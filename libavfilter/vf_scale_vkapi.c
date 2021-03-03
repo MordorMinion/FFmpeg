@@ -94,8 +94,6 @@ typedef struct VKAPIScaleContext {
 
     char    *w_expr[MAX_OUTPUTS]; //!< width  expression string
     char    *h_expr[MAX_OUTPUTS]; //!< height expression string
-    char    *ow_expr[MAX_OUTPUTS]; //!< width  expression string
-    char    *oh_expr[MAX_OUTPUTS]; //!< height expression string
     int32_t filter_flags;
     int32_t out_pixel_format;
     char    *varsfile; //!< variance filename prefix
@@ -123,7 +121,6 @@ typedef struct VKAPIScaleContext {
     /* for debugging purpose */
     int received_frames;
     int send_frames;
-    int32_t internal_stages;
 } VKAPIScaleContext;
 
 /**
@@ -165,9 +162,6 @@ static int vkapi_warnings_retrieve(AVFilterContext *avctx, const char * const ca
     ctx = avctx->priv;
 
     if (ctx->ilctx && ctx->ilctx->devctx) {
-        if (!ctx->ilctx->context_essential.handle)
-            return 0;
-
         while (cnt++ < VK_FW_MAX_WARNINGS_TOPRINT) {
             // get verbose hw error only when the ilctx has effectively been created
             ret = ctx->devctx->ilapi->get_parameter(ctx->ilctx, VK_PARAM_WARNING,
@@ -197,9 +191,6 @@ static int vkapi_error_handling(AVFilterContext *avctx, int ret, const char * co
     vkapi_warnings_retrieve(avctx, caller);
 
     if ((ret == -EADV) && ctx->ilctx) {
-        if (!ctx->ilctx->context_essential.handle)
-            return AVERROR(EINVAL);
-
         // get verbose hw error only when the ilctx has effectively been created
         ret = ctx->devctx->ilapi->get_parameter(ctx->ilctx, VK_PARAM_ERROR,
                                                 &error, VK_CMD_OPT_BLOCKING);
@@ -777,7 +768,7 @@ static int request_frame_3(AVFilterLink *outlink)
 static av_cold int init(AVFilterContext *avctx)
 {
     VKAPIScaleContext *ctx;
-    int i, n = 0;
+    int i;
     int ret = -EINVAL;
 
     static AVFilterPad scale_vkapi_outputs[] = {
@@ -813,7 +804,7 @@ static av_cold int init(AVFilterContext *avctx)
     ctx->send_frames = 0;
 
     for (i = 0; i < ctx->noutputs; i++) {
-        if (ctx->ow_expr[i] == NULL || ctx->oh_expr[i] == NULL) {
+        if (ctx->w_expr[i] == NULL || ctx->h_expr[i] == NULL) {
             av_log(avctx, AV_LOG_ERROR, "scaling data is not available for all stages\n");
             return -EINVAL;
         }
@@ -824,32 +815,10 @@ static av_cold int init(AVFilterContext *avctx)
         return -EINVAL;
     }
 
-    for (i = 0; i < MAX_OUTPUTS; i++) {
-        if (!(ctx->internal_stages & (1 << i))) {
-            if ((!ctx->ow_expr[i]) || (!ctx->oh_expr[i]))
-                break;
-
-            ctx->w_expr[n] = ctx->ow_expr[i];
-            ctx->h_expr[n] = ctx->oh_expr[i];
-            ret = ff_insert_outpad(avctx, n, &scale_vkapi_outputs[n]);
-            av_log(avctx, AV_LOG_DEBUG, "out %d = %sx%s\n", n, ctx->w_expr[n], ctx->h_expr[n] );
-            if (ret < 0)
-                break;
-
-            n++;
-            if (n == ctx->noutputs)
-               break;
-        }
-    }
-
-    if (n != ctx->noutputs) {
-        if (n)
-            av_log(avctx, AV_LOG_ERROR, "%d output(s) specified, but only %d %s valid\n",
-                   ctx->noutputs, n, n > 1 ? "are" : "is");
-        else
-            av_log(avctx, AV_LOG_ERROR, "%d output(s) specified, but none is valid\n",
-                   ctx->noutputs);
-        return -EINVAL;
+    for (i = 0; i < ctx->noutputs; i++) {
+        ret = ff_insert_outpad(avctx, i, &scale_vkapi_outputs[i]);
+        if (ret < 0)
+            break;
     }
 
     return ret;
@@ -874,7 +843,7 @@ fail:
 
 static int vkapi_internal_init(AVFilterLink *inlink)
 {
-    int ret = AVERROR(EINVAL), i, w, h, n = 0;
+    int ret, i;
     AVFilterContext *avctx = inlink->dst;
     VKAPIScaleContext *ctx = avctx->priv;
     vk_scl_cfg scl_cfg;
@@ -882,7 +851,6 @@ static int vkapi_internal_init(AVFilterLink *inlink)
     VKAPIFramesContext *vk_framectx = NULL;
     AVHWFramesContext *avhwframes_ctx = NULL;
     vk_port_id port;
-    AVFilterLink *outlink;
 
     if (inlink->hw_frames_ctx) {
         // on hardware acceleration, we check that the avhw_frames_ctx is effectively there, and instantiate
@@ -909,35 +877,11 @@ static int vkapi_internal_init(AVFilterLink *inlink)
     else
         scl_cfg.out_format = ctx->devctx->av2vk_fmt(ctx->out_pixel_format);
 
-    scl_cfg.internal_stages = ctx->internal_stages;
-
-    for (i = 0; i < MAX_OUTPUTS ; i++) {
-        outlink  = avctx->outputs[n];
-        if (!(ctx->internal_stages & (1 << i))) {
-            scl_cfg.output_size[i].width  = outlink->w;
-            scl_cfg.output_size[i].height = outlink->h;
-            n++;
-            if (n == ctx->noutputs)
-                break;
-        } else {
-            // the dimension of the internal stage is evaluated using
-            // the next output constraints
-            ff_scale_eval_dimensions(avctx,
-                                     ctx->ow_expr[i], ctx->oh_expr[i],
-                                     inlink, outlink,
-                                     &w, &h);
-            ff_scale_adjust_dimensions(inlink, &w, &h, 0, 0);
-            scl_cfg.output_size[i].width = w;
-            scl_cfg.output_size[i].height = h;
-        }
+    for (i = 0; i < ctx->noutputs; i++) {
+        AVFilterLink *outlink  = avctx->outputs[i];
+        scl_cfg.output_size[i].width  = outlink->w;
+        scl_cfg.output_size[i].height = outlink->h;
     }
-
-    if (n != ctx->noutputs) {
-        av_log(avctx, AV_LOG_ERROR, "%d specied output when %d are expected\n",
-               n, ctx->noutputs);
-        goto fail;
-    }
-
     scl_cfg.noutputs = ctx->noutputs;
 
     if (ctx->varsfile) {
@@ -948,6 +892,7 @@ static int vkapi_internal_init(AVFilterLink *inlink)
             if (!ctx->vars[i]) {
                 // will call uninit which will close already open files
                 av_log(avctx, AV_LOG_ERROR, "can't open %s\n", filename);
+                ret = AVERROR(EINVAL);
                 goto fail;
             }
         }
@@ -964,16 +909,19 @@ static int vkapi_internal_init(AVFilterLink *inlink)
 
         if (!custom) {
                 av_log(avctx, AV_LOG_ERROR, "can't open %s \n", ctx->customfile);
+                ret = AVERROR(EINVAL);
                 goto fail;
         }
 
         // read custom parameters
         vk_custom_filter.size = fread(&custom_filter, 1, sizeof(vk_scl_custom_filter), custom);
         fclose(custom);
-        if (vk_custom_filter.size != sizeof(vk_scl_custom_filter))
+        if (vk_custom_filter.size != sizeof(vk_scl_custom_filter)) {
             av_log(avctx, AV_LOG_ERROR,
                    "%s file is of size %d not compatible with the vk_scl_custom_filter structure size ",
                    ctx->customfile, vk_custom_filter.size);
+            ret = AVERROR(EINVAL);
+        }
 
         // transfer them to the card
         vk_custom_filter.data = &custom_filter;
@@ -1190,22 +1138,22 @@ static const AVClass *child_class_next(const AVClass *prev)
 
 static const AVOption scale_options[] = {
     {"outputs", "set number of outputs",    OFFSET(noutputs),   AV_OPT_TYPE_INT, { .i64 = 1 }, 1, INT_MAX, FLAGS },
-    {"w0",     "Output video width",        OFFSET(ow_expr[0]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"width0", "Output video width",        OFFSET(ow_expr[0]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"h0",     "Output video height",       OFFSET(oh_expr[0]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"height0","Output video height",       OFFSET(oh_expr[0]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"w1",     "Output video width",        OFFSET(ow_expr[1]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"width1", "Output video width",        OFFSET(ow_expr[1]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"h1",     "Output video height",       OFFSET(oh_expr[1]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"height1","Output video height",       OFFSET(oh_expr[1]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"w2",     "Output video width",        OFFSET(ow_expr[2]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"width2", "Output video width",        OFFSET(ow_expr[2]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"h2",     "Output video height",       OFFSET(oh_expr[2]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"height2","Output video height",       OFFSET(oh_expr[2]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"w3",     "Output video width",        OFFSET(ow_expr[3]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"width3", "Output video width",        OFFSET(ow_expr[3]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"h3",     "Output video height",       OFFSET(oh_expr[3]), AV_OPT_TYPE_STRING, .flags = FLAGS},
-    {"height3","Output video height",       OFFSET(oh_expr[3]), AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"w0",     "Output video width",        OFFSET(w_expr[0]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"width0", "Output video width",        OFFSET(w_expr[0]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"h0",     "Output video height",       OFFSET(h_expr[0]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"height0","Output video height",       OFFSET(h_expr[0]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"w1",     "Output video width",        OFFSET(w_expr[1]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"width1", "Output video width",        OFFSET(w_expr[1]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"h1",     "Output video height",       OFFSET(h_expr[1]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"height1","Output video height",       OFFSET(h_expr[1]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"w2",     "Output video width",        OFFSET(w_expr[2]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"width2", "Output video width",        OFFSET(w_expr[2]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"h2",     "Output video height",       OFFSET(h_expr[2]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"height2","Output video height",       OFFSET(h_expr[2]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"w3",     "Output video width",        OFFSET(w_expr[3]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"width3", "Output video width",        OFFSET(w_expr[3]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"h3",     "Output video height",       OFFSET(h_expr[3]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
+    {"height3","Output video height",       OFFSET(h_expr[3]),  AV_OPT_TYPE_STRING, .flags = FLAGS},
     {"vars",   "variance map files ",       OFFSET(varsfile),   AV_OPT_TYPE_STRING, .flags = FLAGS},
     {"qpvars", "variance map for qp",       OFFSET(qpvars),     AV_OPT_TYPE_BOOL, {.i64 = 0 }, -1, 1, FLAGS },
     {"custom_params", "custom filter file", OFFSET(customfile), AV_OPT_TYPE_STRING, .flags = FLAGS},
@@ -1222,7 +1170,6 @@ static const AVOption scale_options[] = {
         {"nv21",  "nv21",           0, AV_OPT_TYPE_CONST, {.i64 = AV_PIX_FMT_NV21}, .flags = FLAGS, .unit = "format"},
         {"p010",  "p010",           0, AV_OPT_TYPE_CONST, {.i64 = AV_PIX_FMT_P010}, .flags = FLAGS, .unit = "format"},
         {"vkapi", "vkapi",          0, AV_OPT_TYPE_CONST, {.i64 = AV_PIX_FMT_VKAPI}, .flags = FLAGS, .unit = "format"},
-    {"internal", "internal stages bit mask", OFFSET(internal_stages),  AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
     { NULL }
 };
 

@@ -19,6 +19,8 @@ OBJS-ffmpeg +=                  \
     fftools/sync_queue.o        \
     fftools/thread_queue.o      \
 
+OBJS-ffmpeg-$(CONFIG_VKAPI)        += fftools/ffmpeg_vkapi.o
+
 define DOFFTOOL
 OBJS-$(1) += fftools/cmdutils.o fftools/opt_common.o fftools/$(1).o $(OBJS-$(1)-yes)
 ifdef HAVE_GNU_WINDRES

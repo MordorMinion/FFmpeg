@@ -23,6 +23,7 @@
 #include "cpu.h"
 #include "dict.h"
 #include "frame.h"
+#include "hwcontext.h"
 #include "imgutils.h"
 #include "mem.h"
 #include "samplefmt.h"
@@ -427,7 +428,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
         dst->nb_extended_buf = src->nb_extended_buf;
 
         for (i = 0; i < src->nb_extended_buf; i++) {
-            dst->extended_buf[i] = av_buffer_ref(src->extended_buf[i]);
+            dst->extended_buf[i] = av_buffer_ref(dst);
             if (!dst->extended_buf[i]) {
                 ret = AVERROR(ENOMEM);
                 goto fail;
@@ -464,6 +465,9 @@ FF_ENABLE_DEPRECATION_WARNINGS
     memcpy(dst->data,     src->data,     sizeof(src->data));
     memcpy(dst->linesize, src->linesize, sizeof(src->linesize));
 
+    if (dst->hw_frames_ctx)
+        av_hwframe_ref(dst);
+
     return 0;
 
 fail:
@@ -499,6 +503,9 @@ void av_frame_unref(AVFrame *frame)
         av_buffer_unref(&frame->extended_buf[i]);
     av_freep(&frame->extended_buf);
     av_dict_free(&frame->metadata);
+
+    if (frame->hw_frames_ctx)
+        av_hwframe_release_buffer(frame);
 
     av_buffer_unref(&frame->hw_frames_ctx);
 

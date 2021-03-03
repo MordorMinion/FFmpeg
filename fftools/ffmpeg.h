@@ -69,6 +69,9 @@ enum HWAccelID {
     HWACCEL_NONE = 0,
     HWACCEL_AUTO,
     HWACCEL_GENERIC,
+    HWACCEL_VIDEOTOOLBOX,
+    HWACCEL_QSV,
+    HWACCEL_VKAPI,
 };
 
 typedef struct HWDevice {
@@ -717,6 +720,7 @@ int ffmpeg_parse_options(int argc, char **argv);
 
 int videotoolbox_init(AVCodecContext *s);
 int qsv_init(AVCodecContext *s);
+int vkapi_init(AVCodecContext *s);
 
 HWDevice *hw_device_get_by_name(const char *name);
 int hw_device_init_from_string(const char *arg, HWDevice **dev);

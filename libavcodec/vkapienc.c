@@ -1292,8 +1292,7 @@ static int vkapi_check_hyperpyramid(AVCodecContext *avctx, VKAPIEncodeContext *c
 
     // Align default GOP with vksim and vkservices
     if (ctx->cfg.cfg.gop_type == VK_GOP_UNDEF) {
-        if (ctx->cfg.cfg.standard == VK_V_STANDARD_H264 &&
-            ctx->cfg.cfg.profile == VK_V_PROFILE_H264_BASELINE)
+        if (ctx->cfg.cfg.profile == VK_V_PROFILE_H264_BASELINE)
             // If baseline profile is selected and no gop type, we
             // enforce a gop type compatible with baseline profile
             ctx->cfg.cfg.gop_type = VK_GOP_LOWDELAY;
@@ -1541,9 +1540,6 @@ static int vkapi_warnings_retrieve(AVCodecContext *avctx, const char * const cal
     ctx = avctx->priv_data;
 
     if (ctx->ilctx && ctx->ilctx->devctx) {
-        if (!ctx->ilctx->context_essential.handle)
-            return 0;
-
         while (cnt++ < VK_FW_MAX_WARNINGS_TOPRINT) {
             // get verbose hw error only when the ilctx has effectively been created
             ret = ctx->devctx->ilapi->get_parameter(ctx->ilctx, VK_PARAM_WARNING,
@@ -1573,9 +1569,6 @@ static int vkapi_error_handling(AVCodecContext *avctx, int ret, const char * con
     vkapi_warnings_retrieve(avctx, caller);
 
     if ((ret == -EADV) && ctx->ilctx) {
-        if (!ctx->ilctx->context_essential.handle)
-            return AVERROR(EINVAL);
-
         // get verbose hw error only when the ilctx has effectively been created
         ret = ctx->devctx->ilapi->get_parameter(ctx->ilctx, VK_PARAM_ERROR,
                                                 &error, VK_CMD_OPT_BLOCKING);
@@ -1644,7 +1637,6 @@ static int vkapi_internal_init(AVCodecContext *avctx)
     vk_port port;
     vkil_buffer_packet vk_packet = {.prefix.type = VKIL_BUF_PACKET};
     int32_t used_size = 0;
-    unsigned int q_id;
 
     // some assignment with sanity check
     av_assert0(avctx && avctx->hw_frames_ctx);
@@ -1952,13 +1944,6 @@ static int vkapi_internal_init(AVCodecContext *avctx)
             ctx->cfg.shotchange_input_present = 1;
         }
     }
-
-    // Set the q_id which should be used for returning VK_FID_PROC_BUF_DONE messages
-    q_id = ctx->ilctx->context_essential.queue_id;
-    ret = ctx->devctx->ilapi->set_parameter(ctx->ilctx, VK_PARAM_PROC_BUF_DONE_QID,
-                                            &q_id, VK_CMD_OPT_BLOCKING);
-    if (ret)
-        goto fail;
 
     // Once done, we can complete the encoder initialization
     ret = ctx->devctx->ilapi->init((void **)(&ctx->ilctx));
@@ -2535,12 +2520,8 @@ static int vkapi_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
         clock_gettime(CLOCK_MONOTONIC, &end_time);
         delta_us = _ELAPSED_US(end_time, ctx->flush_time);
         if (delta_us > limit_us) {
-            av_log(avctx,
-                   (ctx->received_packets >= ctx->eos_send_idx) ?
-                       AV_LOG_DEBUG : AV_LOG_ERROR,
-                   "Flush: timeout %d us reached, no EOS, sent frames %ld received packet %ld (eos-idx = %ld) exiting...\n",
-                   delta_us, ctx->send_frames, ctx->received_packets,
-                   ctx->eos_send_idx);
+            av_log(avctx, AV_LOG_ERROR, "Flush: timeout %d us reached, no EOS, exiting...\n",
+                   delta_us);
             vkapi_error_handling(avctx, -EADV, __func__);
             return AVERROR_EOF;
         }
@@ -2636,9 +2617,6 @@ static int vkapi_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
     } else if (ret < 0) {
          av_log(avctx, AV_LOG_ERROR, "error %d on buffer reception\n", ret);
          goto fail;
-    } else {
-         if (ctx->flush)
-             clock_gettime(CLOCK_MONOTONIC, &ctx->flush_time);
     }
 
     if (vk_packet.prefix.handle == VK_BUF_EOS) {

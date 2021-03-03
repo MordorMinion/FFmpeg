@@ -417,6 +417,7 @@ extern const AVFilter ff_vf_scale_cuda;
 extern const AVFilter ff_vf_scale_npp;
 extern const AVFilter ff_vf_scale_qsv;
 extern const AVFilter ff_vf_scale_vaapi;
+extern const AVFilter ff_vf_scale_vkapi;
 extern const AVFilter ff_vf_scale_vulkan;
 extern const AVFilter ff_vf_scale2ref;
 extern const AVFilter ff_vf_scale2ref_npp;
