@@ -19,8 +19,10 @@
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
+#include <strings.h>
 #include <time.h>
 #include "avcodec.h"
+#include "fftools/ffmpeg.h"
 #include "hwconfig.h"
 #include "internal.h"
 #include "libavcodec/decode.h"
@@ -67,12 +69,16 @@ typedef struct VKAPIDecodeContext {
     AVBufferRef  *hwframe;
     //! handy shortcut used to the hwdevice field (the defaukt ilctx created by hwctx is currently used)
     VKAPIDeviceContext *hwctx;
+    int32_t allow_interlace; //! allow interlace decoding
     int32_t interlace; //! the stream is interlaced
+    char    *rotation_expr; //! rotation angle
+    int32_t rotation; //! the clockwise rotation angle for decoder output
     int32_t flush; //!< flushing all the the decoder buffers is required (end of stream)
     int32_t lock; //!<  we are forced to wait for frame to be outputted (decoder work in lock step)
     int32_t send_extradata; //!< indicate if extra data need to be or not
     int32_t max_lag;
     int32_t min_lag;
+    int32_t eos_received;
     int64_t received_frames;
     int64_t sent_packets;
     int64_t start_bad_pkts;
@@ -270,6 +276,9 @@ static int vkapi_decode_flush_internal(AVCodecContext *avctx)
             continue;
         } else if (ret) {
             goto fail;
+        } else {
+            /* reset time so that we only measure incremental */
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
         }
 
         if (hw_surface_desc.prefix.handle == VK_BUF_EOS) {
@@ -466,17 +475,114 @@ static vk_size vkapi_get_size(int width, int height)
     return size;
 }
 
+static int vkapi_rotate(AVCodecContext *avctx)
+{
+    int i, ret = -EINVAL;
+    VKAPIDecodeContext *ctx = avctx->priv_data;
+    InputStream *ist = avctx->opaque;
+    AVPacketSideData *sd;
+    int supersede = 0;
+
+    if (!strcasecmp(ctx->rotation_expr, "no"))
+        // no handling of rotation by decoder
+        return 0;
+
+    for (i = 0; i < ist->st->nb_side_data; i++) {
+        sd  = &ist->st->side_data[i];
+        if (sd->type == AV_PKT_DATA_DISPLAYMATRIX  && ist->autorotate) {
+            double theta = get_rotation(ist->st);
+
+            supersede = 1;
+            if (fabs(theta - 90) < 1.0) {
+                ctx->rotation = VK_ROTATION_90;
+            } else if (fabs(theta - 180) < 1.0) {
+                ctx->rotation = VK_ROTATION_180;
+            } else if (fabs(theta - 270) < 1.0) {
+                ctx->rotation = VK_ROTATION_270;
+            } else if (fabs(theta) > 1.0) {
+                if (avctx->pix_fmt == AV_PIX_FMT_VKAPI) {
+                    av_log(NULL, AV_LOG_ERROR,
+                           "rotation %f not supported with hw format\n ", theta);
+                    goto fail;
+                }
+                // arbitrary rotation still need to be done by sw filter
+                supersede = 0;
+            } else {
+                av_log(NULL, AV_LOG_DEBUG, "no rotation\n");
+            }
+            break;
+        }
+    }
+
+    if (strcasecmp(ctx->rotation_expr, "auto")) {
+        // rotation is specified by user
+        char *end = NULL;
+
+        ctx->rotation = strtol(ctx->rotation_expr, &end, 10);
+        if (end == ctx->rotation_expr) {
+            av_log(NULL, AV_LOG_ERROR,
+                   "Could not convert value %s for rotation", ctx->rotation_expr);
+            goto fail;
+        }
+        ctx->rotation %= 360; // just modulo 360 is good enough!
+        if ((ctx->rotation != VK_ROTATION_0) && (ctx->rotation != VK_ROTATION_90) &&
+            (ctx->rotation != VK_ROTATION_180) && (ctx->rotation != VK_ROTATION_270)) {
+            av_log(NULL, AV_LOG_ERROR,
+                   "rotation=%d not supported by decoder ", ctx->rotation);
+                goto fail;
+        }
+        // if a rotation is specified, it supersedes the previoulsy inferred one
+    }
+
+    if (supersede) {
+        av_display_rotation_set((uint32_t *)sd->data, 0);
+        // so technically we are not in autorotate mode anymore
+        ist->autorotate = 0;
+    }
+
+    // once rotation is done, we need to do the same for the sample aspect ratio
+    if ((ctx->rotation == VK_ROTATION_90) || (ctx->rotation == VK_ROTATION_270)) {
+        // the sample aspect ratio is inverted (means pixel size is swapped)
+        // both for the avctx one and the stream level one (which overwrite the avctx
+        // when present
+        if (avctx->sample_aspect_ratio.num)
+            avctx->sample_aspect_ratio =
+                av_div_q((AVRational) { 1, 1 },  avctx->sample_aspect_ratio);
+        if (ist->st->sample_aspect_ratio.num)
+            ist->st->sample_aspect_ratio =
+                av_div_q((AVRational) { 1, 1 },  ist->st->sample_aspect_ratio);
+    }
+
+    return 0;
+
+fail:
+    return ret;
+}
+
 static int vkapi_internal_init(AVCodecContext *avctx)
 {
     int ret, profile_level, codec, pix_fmt;
     vk_size size;
-    unsigned int fps;
+    unsigned int fps, q_id;
     VKAPIDecodeContext *ctx = avctx->priv_data;
     AVHWFramesContext *hwframe_ctx = (AVHWFramesContext *)ctx->hwframe->data;
     vk_port_id port;
     VKAPIFramesContext *vk_framectx = hwframe_ctx->hwctx;
 
     ret = vkapi_rotate(avctx);
+    if (ret)
+        goto fail_init;
+
+    ret = ctx->hwctx->ilapi->init((void **)(&vk_framectx->ilctx));
+    if (ret)
+        goto fail_init;
+
+    av_log(avctx, AV_LOG_DEBUG, "vk_framectx=%p, vk_framectx->ilctx=%p", vk_framectx, vk_framectx->ilctx);
+    vk_framectx->ilctx->context_essential.component_role = VK_DECODER;
+    vk_framectx->ilctx->context_essential.queue_id = vkil_get_processing_pri();
+
+    // first phase init, allocate a decoder context
+    ret = ctx->hwctx->ilapi->init((void **)(&vk_framectx->ilctx));
     if (ret)
         goto fail_init;
 
@@ -529,6 +635,17 @@ static int vkapi_internal_init(AVCodecContext *avctx)
     if (ret)
         goto fail;
 
+    if (ctx->rotation) {
+        // the vksim takes a counter clockwise rotation as input
+        int32_t cc_rotation = 360 - ctx->rotation;
+
+        av_log(avctx, AV_LOG_DEBUG, "rotation=%d degrees\n", ctx->rotation);
+        ret = ctx->hwctx->ilapi->set_parameter(vk_framectx->ilctx, VK_PARAM_VIDEO_ROTATION,
+                                               &cc_rotation, VK_CMD_OPT_BLOCKING);
+        if (ret)
+            goto fail;
+    }
+
     ret = ctx->hwctx->ilapi->set_parameter(vk_framectx->ilctx, VK_PARAM_VIDEO_PROFILEANDLEVEL,
                                            &profile_level, VK_CMD_OPT_BLOCKING);
     if (ret)
@@ -546,6 +663,12 @@ static int vkapi_internal_init(AVCodecContext *avctx)
     fps = (avctx->framerate.num << 16) | (avctx->framerate.den & 0xFFFF);
     ret = ctx->hwctx->ilapi->set_parameter(vk_framectx->ilctx, VK_PARAM_VIDEO_DEC_FPS,
                                            &fps, VK_CMD_OPT_BLOCKING);
+    if (ret)
+        goto fail;
+
+    q_id = vk_framectx->ilctx->context_essential.queue_id;
+    ret = ctx->hwctx->ilapi->set_parameter(vk_framectx->ilctx, VK_PARAM_PROC_BUF_DONE_QID,
+                                           &q_id, VK_CMD_OPT_BLOCKING);
     if (ret)
         goto fail;
 
@@ -577,6 +700,9 @@ static int vkapi_internal_init(AVCodecContext *avctx)
         if (ret)
             goto fail;
     }
+
+    if ((ctx->rotation == VK_ROTATION_90) || (ctx->rotation == VK_ROTATION_270))
+        FFSWAP(int, hwframe_ctx->height, hwframe_ctx->width);
 
     // get the max lag from the card
     ret = ctx->hwctx->ilapi->get_parameter(vk_framectx->ilctx, VK_PARAM_MAX_LAG,
@@ -1058,6 +1184,10 @@ static int vkapi_receive_frame(AVCodecContext *avctx, AVFrame *frame)
         if (ret)
             goto fail;
 
+        /* update the height and width from avhw_framesctx(output resolution), rather than the input resolution */
+        frame->height = avhw_framectx->height;
+        frame->width = avhw_framectx->width;
+
         ret = ff_get_buffer(avctx, frame, 0);
         if (ret)
             goto fail;
@@ -1117,13 +1247,15 @@ static int vkapi_decode(AVCodecContext *avctx, AVFrame *frame)
     av_assert0(avctx);
     av_assert0(frame);
 
+    if (ctx->eos_received)
+        return AVERROR_EOF;
     // drain the output buffer first
     got_frame =  vkapi_receive_frame(avctx, frame);
 
  #define BUG_SOC_11836 1
 
  #ifdef BUG_SOC_11836
-        if (ctx->interlace) {
+    if ((!ctx->allow_interlace) && ctx->interlace) {
             ret =  AVERROR(EINVAL);
             av_log(avctx, AV_LOG_ERROR, "interlaced stream not supported %d\n", ret);
             exit_program(VK_EXIT_ERROR);
@@ -1163,6 +1295,10 @@ out:
     av_packet_unref(&avpkt);
     if ((ret < 0) && (ret != AVERROR_EOF) && (ret != AVERROR(EAGAIN)) && ctx->exit_on_error)
         exit_program(VK_EXIT_ERROR);
+
+    if (ret == AVERROR_EOF)
+        ctx->eos_received = 1;
+
     return ret;
 }
 
@@ -1179,7 +1315,13 @@ static const AVCodecHWConfigInternal *vkapi_hw_configs[] = {
     NULL
 };
 
-static const AVOption options[]={
+#define OFFSET(x) offsetof(VKAPIDecodeContext, x)
+#define VD (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM)
+
+static const AVOption dec_options[] = {
+    {"interlace", "allow interlace", OFFSET(allow_interlace), AV_OPT_TYPE_BOOL, {0}, 0, 1, VD },
+    {"rotate", "rotate the output video by 90/180/270 degrees", OFFSET(rotation_expr),
+     AV_OPT_TYPE_STRING, {.str = "auto"}, 0, 0, VD },
     {NULL}
 };
 
@@ -1187,7 +1329,7 @@ static const AVOption options[]={
     static const AVClass ff_vkapi_##NAME##_dec_class = { \
         .class_name = "vkapi_" #NAME "_dec", \
         .item_name  = av_default_item_name, \
-        .option     = options, \
+        .option     = dec_options, \
         .version    = LIBAVUTIL_VERSION_INT, \
     };
 

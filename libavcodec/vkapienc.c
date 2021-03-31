@@ -1292,7 +1292,8 @@ static int vkapi_check_hyperpyramid(AVCodecContext *avctx, VKAPIEncodeContext *c
 
     // Align default GOP with vksim and vkservices
     if (ctx->cfg.cfg.gop_type == VK_GOP_UNDEF) {
-        if (ctx->cfg.cfg.profile == VK_V_PROFILE_H264_BASELINE)
+        if (ctx->cfg.cfg.standard == VK_V_STANDARD_H264 &&
+            ctx->cfg.cfg.profile == VK_V_PROFILE_H264_BASELINE)
             // If baseline profile is selected and no gop type, we
             // enforce a gop type compatible with baseline profile
             ctx->cfg.cfg.gop_type = VK_GOP_LOWDELAY;
@@ -1643,6 +1644,7 @@ static int vkapi_internal_init(AVCodecContext *avctx)
     vk_port port;
     vkil_buffer_packet vk_packet = {.prefix.type = VKIL_BUF_PACKET};
     int32_t used_size = 0;
+    unsigned int q_id;
 
     // some assignment with sanity check
     av_assert0(avctx && avctx->hw_frames_ctx);
@@ -1950,6 +1952,13 @@ static int vkapi_internal_init(AVCodecContext *avctx)
             ctx->cfg.shotchange_input_present = 1;
         }
     }
+
+    // Set the q_id which should be used for returning VK_FID_PROC_BUF_DONE messages
+    q_id = ctx->ilctx->context_essential.queue_id;
+    ret = ctx->devctx->ilapi->set_parameter(ctx->ilctx, VK_PARAM_PROC_BUF_DONE_QID,
+                                            &q_id, VK_CMD_OPT_BLOCKING);
+    if (ret)
+        goto fail;
 
     // Once done, we can complete the encoder initialization
     ret = ctx->devctx->ilapi->init((void **)(&ctx->ilctx));
@@ -2627,6 +2636,9 @@ static int vkapi_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
     } else if (ret < 0) {
          av_log(avctx, AV_LOG_ERROR, "error %d on buffer reception\n", ret);
          goto fail;
+    } else {
+         if (ctx->flush)
+             clock_gettime(CLOCK_MONOTONIC, &ctx->flush_time);
     }
 
     if (vk_packet.prefix.handle == VK_BUF_EOS) {

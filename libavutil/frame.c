@@ -428,7 +428,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
         dst->nb_extended_buf = src->nb_extended_buf;
 
         for (i = 0; i < src->nb_extended_buf; i++) {
-            dst->extended_buf[i] = av_buffer_ref(dst);
+            dst->extended_buf[i] = av_buffer_ref(src->extended_buf[i]);
             if (!dst->extended_buf[i]) {
                 ret = AVERROR(ENOMEM);
                 goto fail;

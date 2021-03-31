@@ -22,6 +22,15 @@
 #include "mux.h"
 #include "libavutil/intreadwrite.h"
 
+/*
+ * VK_FATE_WORKAROUND is enabled during fate testing only.
+ * This workaround is required to pass VK c model but cannot be upstreamed.
+ * Thus maintain this workaround locally.
+ */
+#ifndef VK_FATE_WORKAROUND
+#define MVE_CHECK_BITEXACTNESS
+#endif
+
 typedef struct IVFEncContext {
     unsigned frame_cnt;
     uint64_t last_pts, sum_delta_pts, last_pkt_duration;
