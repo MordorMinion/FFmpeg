@@ -573,19 +573,6 @@ static int vkapi_internal_init(AVCodecContext *avctx)
     if (ret)
         goto fail_init;
 
-    ret = ctx->hwctx->ilapi->init((void **)(&vk_framectx->ilctx));
-    if (ret)
-        goto fail_init;
-
-    av_log(avctx, AV_LOG_DEBUG, "vk_framectx=%p, vk_framectx->ilctx=%p", vk_framectx, vk_framectx->ilctx);
-    vk_framectx->ilctx->context_essential.component_role = VK_DECODER;
-    vk_framectx->ilctx->context_essential.queue_id = vkil_get_processing_pri();
-
-    // first phase init, allocate a decoder context
-    ret = ctx->hwctx->ilapi->init((void **)(&vk_framectx->ilctx));
-    if (ret)
-        goto fail_init;
-
     // normally, the decoder can start to decode the stream header allowing to set the below parameter.
     // the first decoding to set the decoder can be done eitehr in HW or SW
     // (currently it is done in SW, so frame size is already set into avctx)
