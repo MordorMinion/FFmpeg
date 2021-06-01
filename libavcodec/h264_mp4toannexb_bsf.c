@@ -41,6 +41,7 @@ typedef struct H264BSFContext {
     uint8_t  idr_sps_seen;
     uint8_t  idr_pps_seen;
     int      extradata_parsed;
+    int      extradata_sent;
 } H264BSFContext;
 
 static void count_or_copy(uint8_t **out, uint64_t *out_size,
@@ -158,6 +159,7 @@ static int h264_mp4toannexb_init(AVBSFContext *ctx)
         s->idr_sps_seen     = 0;
         s->idr_pps_seen     = 0;
         s->extradata_parsed = 1;
+        s->extradata_sent   = 0;
     } else {
         av_log(ctx, AV_LOG_ERROR, "Invalid extradata size: %d\n", extra_size);
         return AVERROR_INVALIDDATA;
@@ -176,6 +178,7 @@ static int h264_mp4toannexb_filter(AVBSFContext *ctx, AVPacket *opkt)
     uint8_t *out;
     uint64_t out_size;
     int ret;
+    int extradata_sent;
 
     ret = ff_bsf_get_packet(ctx, &in);
     if (ret < 0)
@@ -199,6 +202,7 @@ static int h264_mp4toannexb_filter(AVBSFContext *ctx, AVPacket *opkt)
         sps_seen = s->idr_sps_seen;
         pps_seen = s->idr_pps_seen;
         out_size = 0;
+        extradata_sent = s->extradata_sent;
 
         do {
             uint32_t nal_size = 0;
@@ -220,7 +224,6 @@ static int h264_mp4toannexb_filter(AVBSFContext *ctx, AVPacket *opkt)
                 continue;
 
             unit_type = *buf & 0x1f;
-
             if (unit_type == H264_NAL_SPS) {
                 sps_seen = new_idr = 1;
             } else if (unit_type == H264_NAL_PPS) {
@@ -234,6 +237,10 @@ static int h264_mp4toannexb_filter(AVBSFContext *ctx, AVPacket *opkt)
                         sps_seen = 1;
                     }
                 }
+            } else if (!extradata_sent) {
+                av_log(ctx, AV_LOG_WARNING,
+                       "stream detected as not starting by an idr, still preprend sps/pps \n");
+                unit_type = H264_NAL_IDR_SLICE;
             }
 
             /* If this is a new IDR picture following an IDR picture, reset the idr flag.
@@ -244,9 +251,11 @@ static int h264_mp4toannexb_filter(AVBSFContext *ctx, AVPacket *opkt)
 
             /* prepend only to the first type 5 NAL unit of an IDR picture, if no sps/pps are already present */
             if (new_idr && unit_type == H264_NAL_IDR_SLICE && !sps_seen && !pps_seen) {
-                if (ctx->par_out->extradata)
+                if (ctx->par_out->extradata) {
                     count_or_copy(&out, &out_size, ctx->par_out->extradata,
                                   ctx->par_out->extradata_size, -1, j);
+                    extradata_sent = 1;
+                }
                 new_idr = 0;
             /* if only SPS has been seen, also insert PPS */
             } else if (new_idr && unit_type == H264_NAL_IDR_SLICE && sps_seen && !pps_seen) {
@@ -286,6 +295,7 @@ static int h264_mp4toannexb_filter(AVBSFContext *ctx, AVPacket *opkt)
     s->new_idr      = new_idr;
     s->idr_sps_seen = sps_seen;
     s->idr_pps_seen = pps_seen;
+    s->extradata_sent = extradata_sent;
 
     ret = av_packet_copy_props(opkt, in);
     if (ret < 0)

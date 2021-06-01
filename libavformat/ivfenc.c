@@ -72,7 +72,7 @@ static int ivf_write_header(AVFormatContext *s)
     avio_wl16(pb, par->height);
     avio_wl32(pb, s->streams[0]->time_base.den);
     avio_wl32(pb, s->streams[0]->time_base.num);
-    avio_wl64(pb, 0xFFFFFFFFFFFFFFFFULL); // length is overwritten at the end of muxing
+    avio_wl64(pb, 0xFFFFFFFFFFFFFFFFULL);
 
     return 0;
 }
