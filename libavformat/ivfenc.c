@@ -22,8 +22,6 @@
 #include "mux.h"
 #include "libavutil/intreadwrite.h"
 
-#define MVE_CHECK_BITEXACTNESS
-
 typedef struct IVFEncContext {
     unsigned frame_cnt;
     uint64_t last_pts, sum_delta_pts, last_pkt_duration;
@@ -72,13 +70,8 @@ static int ivf_write_header(AVFormatContext *s)
               par->codec_id == AV_CODEC_ID_VP8 ? AV_RL32("VP80") : AV_RL32("AV01"));
     avio_wl16(pb, par->width);
     avio_wl16(pb, par->height);
-#ifdef MVE_CHECK_BITEXACTNESS
-    avio_wl32(pb, s->streams[0]->time_base.den << 16);
-    avio_wl32(pb, s->streams[0]->time_base.num << 16);
-#else
     avio_wl32(pb, s->streams[0]->time_base.den);
     avio_wl32(pb, s->streams[0]->time_base.num);
-#endif
     avio_wl64(pb, 0xFFFFFFFFFFFFFFFFULL);
 
     return 0;
@@ -90,11 +83,7 @@ static int ivf_write_packet(AVFormatContext *s, AVPacket *pkt)
     IVFEncContext *ctx = s->priv_data;
 
     avio_wl32(pb, pkt->size);
-#ifdef MVE_CHECK_BITEXACTNESS
-    avio_wl64(pb, pkt->pts + 1);
-#else
     avio_wl64(pb, pkt->pts);
-#endif
     avio_write(pb, pkt->data, pkt->size);
     if (ctx->frame_cnt)
         ctx->sum_delta_pts += pkt->pts - ctx->last_pts;

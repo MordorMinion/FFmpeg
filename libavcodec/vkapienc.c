@@ -1540,6 +1540,9 @@ static int vkapi_warnings_retrieve(AVCodecContext *avctx, const char * const cal
     ctx = avctx->priv_data;
 
     if (ctx->ilctx && ctx->ilctx->devctx) {
+        if (!ctx->ilctx->context_essential.handle)
+            return 0;
+
         while (cnt++ < VK_FW_MAX_WARNINGS_TOPRINT) {
             // get verbose hw error only when the ilctx has effectively been created
             ret = ctx->devctx->ilapi->get_parameter(ctx->ilctx, VK_PARAM_WARNING,
@@ -1569,6 +1572,9 @@ static int vkapi_error_handling(AVCodecContext *avctx, int ret, const char * con
     vkapi_warnings_retrieve(avctx, caller);
 
     if ((ret == -EADV) && ctx->ilctx) {
+        if (!ctx->ilctx->context_essential.handle)
+            return AVERROR(EINVAL);
+
         // get verbose hw error only when the ilctx has effectively been created
         ret = ctx->devctx->ilapi->get_parameter(ctx->ilctx, VK_PARAM_ERROR,
                                                 &error, VK_CMD_OPT_BLOCKING);
@@ -2520,8 +2526,12 @@ static int vkapi_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
         clock_gettime(CLOCK_MONOTONIC, &end_time);
         delta_us = _ELAPSED_US(end_time, ctx->flush_time);
         if (delta_us > limit_us) {
-            av_log(avctx, AV_LOG_ERROR, "Flush: timeout %d us reached, no EOS, exiting...\n",
-                   delta_us);
+            av_log(avctx,
+                   (ctx->received_packets >= ctx->eos_send_idx) ?
+                       AV_LOG_DEBUG : AV_LOG_ERROR,
+                   "Flush: timeout %d us reached, no EOS, sent frames %ld received packet %ld (eos-idx = %ld) exiting...\n",
+                   delta_us, ctx->send_frames, ctx->received_packets,
+                   ctx->eos_send_idx);
             vkapi_error_handling(avctx, -EADV, __func__);
             return AVERROR_EOF;
         }

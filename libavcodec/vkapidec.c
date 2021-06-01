@@ -147,6 +147,9 @@ static int vkapi_warnings_retrieve(AVCodecContext *avctx, const char * const cal
     vk_framectx = hwframe_ctx->hwctx;
 
     if (vk_framectx && vk_framectx->ilctx && vk_framectx->ilctx->devctx) {
+        if (!vk_framectx->ilctx->context_essential.handle)
+            return 0;
+
         while (cnt++ < VK_FW_MAX_WARNINGS_TOPRINT) {
             ret = ctx->hwctx->ilapi->get_parameter(vk_framectx->ilctx, VK_PARAM_WARNING,
                                                    &warn, VK_CMD_OPT_BLOCKING);
@@ -179,6 +182,9 @@ static int vkapi_error_handling(AVCodecContext *avctx, int ret, const char * con
     vkapi_warnings_retrieve(avctx, caller);
 
     if ((ret == -EADV) && vk_framectx->ilctx) {
+        if (!vk_framectx->ilctx->context_essential.handle)
+            return AVERROR(EINVAL);
+
         // get verbose hw error only when the ilctx has effectively been created
         ret = ctx->hwctx->ilapi->get_parameter(vk_framectx->ilctx, VK_PARAM_ERROR,
                                                 &error, VK_CMD_OPT_BLOCKING);
@@ -388,7 +394,8 @@ static int vkapi_get_vkprofilelevel(const int ffprofile, const int fflevel, cons
             case FF_PROFILE_H264_MAIN:                 profile = VK_V_PROFILE_H264_MAIN; break;
             case FF_PROFILE_H264_EXTENDED:             profile = VK_V_PROFILE_H264_EXTENDED; break;
             case FF_PROFILE_H264_HIGH:                 profile = VK_V_PROFILE_H264_HIGH; break;
-            default: profile = VK_V_PROFILE_UNKNOWN;
+            case FF_PROFILE_UNKNOWN:                   profile = VK_V_PROFILE_UNKNOWN; break;
+            default: profile = VK_V_PROFILE_UNSUPPORTED;
         }
         switch (fflevel) {
             case 10: level = VK_V_LEVEL_H264_1;  break;
@@ -413,7 +420,8 @@ static int vkapi_get_vkprofilelevel(const int ffprofile, const int fflevel, cons
         switch (ffprofile) {
             case FF_PROFILE_HEVC_MAIN:     profile = VK_V_PROFILE_HEVC_MAIN; break;
             case FF_PROFILE_HEVC_MAIN_10:  profile = VK_V_PROFILE_HEVC_MAIN10; break;
-            default: profile = VK_V_PROFILE_UNKNOWN;
+            case FF_PROFILE_UNKNOWN:       profile = VK_V_PROFILE_UNKNOWN; break;
+            default: profile = VK_V_PROFILE_UNSUPPORTED;
         }
         // in HEVC, the provided level (general_level_idc) is 30 times the effective level
         // in accordance with ITU-T Rec H.265 section A.4.1
@@ -431,11 +439,12 @@ static int vkapi_get_vkprofilelevel(const int ffprofile, const int fflevel, cons
         }
     } else if (codec_id == AV_CODEC_ID_VP9) {
         switch (ffprofile) {
-            case FF_PROFILE_VP9_0: profile = VK_V_PROFILE_VP9_0; break;
-            case FF_PROFILE_VP9_1: profile = VK_V_PROFILE_VP9_1; break;
-            case FF_PROFILE_VP9_2: profile = VK_V_PROFILE_VP9_2; break;
-            case FF_PROFILE_VP9_3: profile = VK_V_PROFILE_VP9_3; break;
-            default: profile = VK_V_PROFILE_UNKNOWN;
+            case FF_PROFILE_VP9_0:   profile = VK_V_PROFILE_VP9_0; break;
+            case FF_PROFILE_VP9_1:   profile = VK_V_PROFILE_VP9_1; break;
+            case FF_PROFILE_VP9_2:   profile = VK_V_PROFILE_VP9_2; break;
+            case FF_PROFILE_VP9_3:   profile = VK_V_PROFILE_VP9_3; break;
+            case FF_PROFILE_UNKNOWN: profile = VK_V_PROFILE_UNKNOWN; break;
+            default: profile = VK_V_PROFILE_UNSUPPORTED;
         }
     }
     return (((profile & 0xffff) << 16) | (level & 0xffff));
@@ -467,16 +476,7 @@ static int vkapi_internal_init(AVCodecContext *avctx)
     vk_port_id port;
     VKAPIFramesContext *vk_framectx = hwframe_ctx->hwctx;
 
-    ret = ctx->hwctx->ilapi->init((void **)(&vk_framectx->ilctx));
-    if (ret)
-        goto fail_init;
-
-    av_log(avctx, AV_LOG_DEBUG, "vk_framectx=%p, vk_framectx->ilctx=%p", vk_framectx, vk_framectx->ilctx);
-    vk_framectx->ilctx->context_essential.component_role = VK_DECODER;
-    vk_framectx->ilctx->context_essential.queue_id = vkil_get_processing_pri();
-
-    // first phase init, allocate a decoder context
-    ret = ctx->hwctx->ilapi->init((void **)(&vk_framectx->ilctx));
+    ret = vkapi_rotate(avctx);
     if (ret)
         goto fail_init;
 
@@ -496,6 +496,25 @@ static int vkapi_internal_init(AVCodecContext *avctx)
     }
 
     profile_level = vkapi_get_vkprofilelevel(avctx->profile, avctx->level, avctx->codec_id);
+
+    if (((profile_level >> 16) & VK_V_PROFILE_MAX) == VK_V_PROFILE_UNSUPPORTED)
+        av_log(avctx, AV_LOG_WARNING, "Unsupported profile %d for codec=%d; continuing on a best effort basis\n",
+               avctx->profile, codec);
+
+
+    ret = ctx->hwctx->ilapi->init((void **)(&vk_framectx->ilctx));
+    if (ret)
+        goto fail_init;
+
+    av_log(avctx, AV_LOG_DEBUG, "vk_framectx=%p, vk_framectx->ilctx=%p", vk_framectx, vk_framectx->ilctx);
+    vk_framectx->ilctx->context_essential.component_role = VK_DECODER;
+    vk_framectx->ilctx->context_essential.queue_id = vkil_get_processing_pri();
+
+    // first phase init, allocate a decoder context
+    ret = ctx->hwctx->ilapi->init((void **)(&vk_framectx->ilctx));
+    if (ret)
+        goto fail_init;
+
     size  = vkapi_get_size(avctx->width, avctx->height);
 
     av_log(avctx, AV_LOG_DEBUG, "profile_level=%d codec=%d size=(%dx%d) \n",
